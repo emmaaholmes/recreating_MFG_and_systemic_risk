@@ -1,0 +1,251 @@
+---
+title: "Recreating 'Mean Field Games and Systemic Risk' by Carmona, Fouque, and Sun, 2013"
+author: "Emma Holmes"
+date: "March 2021"
+output: 
+  pdf_document:
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+set.seed(72021)
+```
+
+# Simple model
+Here we model a system of N banks that borrow and lend to each other.
+$$
+dX^i_t = \frac{a}{N} \sum^N_{j=1} (X^j_t - X^i_t) dt + \sigma dW_t, \quad i=1,...,N
+$$
+where $W_t$ are independent Brownian motions and $X^i_0=0$ for $i=1,...,N$.
+
+Here is code to simulate this simple model:
+```{r}
+###' @param N number of banks
+###' @param a mean-reversion rate
+###' @param sigma diffusion
+###' @param X0 initial value for process X, assumed iid
+###' @param end_time end of sim
+###' @param dt Euler time step
+simple_lending_model <- function(N,a,sigma,D=-0.7,rho=0,X0=0,end_time=1,dt=1e-4){
+  ## set-up
+  Nsteps <- end_time / dt + 1   # number of steps to take
+  X <- matrix(nrow=N,ncol=Nsteps)   # empty matrix to store results
+  X[,1] <- rep(X0,N)   # X_0 = X0 for all banks
+  defaults <- rep(0,N)
+  
+  for (n in 2:Nsteps){
+    dW0t <- sqrt(dt) * rnorm(1)   # common noise
+    dWt <- sqrt(dt) * rnorm(N)   # Brownian motion
+    X_bar <- sum(X[,n-1]) / N   # mean
+    # Euler step:
+    X[,n] = X[,n-1] + a * (rep(X_bar,N) - X[,n-1]) * dt + sigma *
+      (rho * rep(dW0t,N) + sqrt(1-rho^2)*dWt)
+    # record defaults
+    defaults <- defaults + ifelse(X[,n]<= D,1,0)
+  }
+  # clean up defaults (1 if defaulted at least once)
+  defaults <- ifelse(defaults>0,1,0)
+  # clean up and return tibble of banks trajectories and times
+  rownames(X) <- sapply(1:N, function(x) paste0("bank",x))
+  times <- seq(0,end_time,by=dt)
+  return(list(as_tibble(cbind(t(X),times)), defaults))
+}
+```
+
+### Figure 2.1
+Let $N=10$, and $\sigma=1$. Here are two sets of trajectories: one with $a=10$, and one with $a=0$, i.e. only Brownian motion. This recreates figure 2.1 from the paper.
+
+```{r}
+res1 = simple_lending_model(N=10,a=10,sigma=1,X0=0)
+plot1 <- res1[[1]] %>% 
+  pivot_longer(cols = 'bank1':'bank10',values_to = 'value',names_to = 'bank') %>% 
+  ggplot(aes(times,value,colour=bank)) + geom_line(alpha=0.5) +
+  geom_hline(yintercept = -0.7) + xlab('') + ylab('') +
+  theme_bw() + theme(legend.position = "none") + ylim(-2,2) +
+  ggtitle("a=10")
+
+res2 = simple_lending_model(N=10,a=0,sigma=1,X0=0)
+plot2 <- res2[[1]] %>% 
+  pivot_longer(cols = 'bank1':'bank10',values_to = 'value',names_to = 'bank') %>% 
+  ggplot(aes(times,value,colour=bank))+ geom_line(alpha=0.5) +
+  geom_hline(yintercept = -0.7) + xlab('') + ylab('') +
+  theme_bw() + theme(legend.position = "none") + ylim(-2,2) +
+  ggtitle("a=0")
+
+gridExtra::grid.arrange(plot1,plot2,nrow=1)
+```
+
+## Default distributions
+
+This function computes the distribution of the number of defaults using the Monte Varlo method. 
+```{r}
+###' @param Nsims number of simulations for Monte Carlo
+###' all other params as above
+default_distribution <- function(Nsims,N,a,sigma=1,D=-0.7,rho=0,X0=0){
+  # name file to save data:
+  savefile <- sprintf("saved_sims/Nsims_%g_Nbanks_%g_a_%g_sigma_%g_rho_%g.Rdata",
+                      Nsims,N,a,sigma,rho)
+  if (!file.exists(savefile)){
+      defaults <- rep(NA,Nsims)
+      for (sim in 1:Nsims){
+        # run the simple model Nsims times
+        X <- simple_lending_model(N=N,a=a,sigma=sigma,D=D,rho=rho,X0=X0)
+        # count number of defaults this run
+        defaults[sim] <- sum(X[[2]])
+      }
+      save(defaults,file=savefile)
+  } else{
+      load(savefile)
+    }
+  return(defaults)
+}
+```
+
+```{r}
+Nsims <- 10000
+defaults1 <- default_distribution(Nsims=Nsims,N=10,a=0)
+defaults2 <- default_distribution(Nsims=Nsims,N=10,a=10)
+defaults3 <- default_distribution(Nsims=Nsims,N=10,a=100)
+```
+
+### Figure 2.2
+```{r, fig.height=4}
+# figure 2.2 from paper
+a1=as_tibble(defaults1) %>% count(value) %>% 
+  mutate(n=n/Nsims) %>% rbind(c(value=10,n=0))
+a2=as_tibble(defaults2) %>% count(value) %>% mutate(n=n/Nsims) 
+
+fig_2_2a <- ggplot(data=a1,aes(value,n)) + 
+  geom_line(colour='blue',lty=2) + 
+  geom_line(data=a2, colour='blue') + 
+  theme_classic() +
+  xlab("# of default") + ylab("prob of # of default")
+
+fig_2_2b <- ggplot(data=a1,aes(value,n)) + 
+  geom_line(colour='blue',lty=2) + 
+  geom_line(data=a2, colour='blue') + 
+  theme_classic() + 
+  coord_cartesian(xlim = c(6, 10),ylim=c(0,0.2)) +
+  xlab("# of default") + ylab("prob of # of default")
+
+gridExtra::grid.arrange(fig_2_2a,fig_2_2b,nrow=1)
+```
+
+```{r, fig.height=4}
+# figure 2.2 with KDE instead
+defaults12 <- rbind(mutate(as_tibble(defaults1),a = 0),
+                  mutate(as_tibble(defaults2),a = 10)) 
+
+plot_a <- defaults12 %>% mutate(a = as.factor(a)) %>%
+  ggplot(aes(value, group=a,fill=a)) + 
+  geom_density(adjust=2.5, alpha=0.5) + 
+  theme_minimal() +
+  xlab("# of default")
+
+plot_b <- defaults12 %>% mutate(a = as.factor(a)) %>%
+  ggplot(aes(value, group=a, fill=a)) + geom_density(adjust=2.5, alpha=0.5) + 
+  theme_minimal() + coord_cartesian(xlim = c(6, 10),ylim=c(0,0.2)) +
+  xlab("# of default")
+
+gridExtra::grid.arrange(plot_a,plot_b,nrow=1)
+```
+
+### Figure 2.3
+```{r, fig.height=4}
+# figure 2.3 from paper
+a3=as_tibble(defaults3) %>% count(value) %>% mutate(n=n/Nsims) 
+
+fig_2_3a <- ggplot(data=a1,aes(value,n)) + 
+  geom_line(colour='blue',lty=2) + 
+  geom_line(data=a3, colour='blue') + 
+  theme_classic() +
+  xlab("# of default") + ylab("prob of # of default")
+
+fig_2_3b <- ggplot(data=a1,aes(value,n)) + 
+  geom_line(colour='blue',lty=2) + 
+  geom_line(data=a3, colour='blue') + 
+  theme_classic() + coord_cartesian(xlim = c(6, 10),ylim=c(0,0.2)) +
+  xlab("# of default") + ylab("prob of # of default")
+
+gridExtra::grid.arrange(fig_2_3a,fig_2_3b,nrow=1)
+```
+
+```{r, fig.height=4}
+# figure 2.3 with KDE instead
+defaults13 <- rbind(mutate(as_tibble(defaults1),a = 0),
+                  mutate(as_tibble(defaults3),a = 100)) 
+
+plot_c <- defaults13 %>% mutate(a = as.factor(a)) %>%
+  ggplot(aes(value, group=a,fill=a)) + 
+  geom_density(adjust=2.5, alpha=0.5) + 
+  theme_minimal() +
+  xlab("# of default")
+
+plot_d <- defaults13 %>% mutate(a = as.factor(a)) %>%
+  ggplot(aes(value, group=a, fill=a)) + geom_density(adjust=2.5, alpha=0.5) + 
+  theme_minimal() + coord_cartesian(xlim = c(6, 10),ylim=c(0,0.2)) +
+  xlab("# of default")
+
+gridExtra::grid.arrange(plot_c,plot_d,nrow=1)
+```
+
+# Correlated Brownian Motions (figure 2.4)
+
+```{r}
+# Figure 2.4
+res1 = simple_lending_model(N=10,a=10,sigma=1,rho=0,X0=0)
+plot1 <- res1[[1]] %>% 
+  pivot_longer(cols = 'bank1':'bank10',values_to = 'value',names_to = 'bank') %>% 
+  ggplot(aes(times,value,colour=bank)) + geom_line(alpha=0.5) +
+  geom_hline(yintercept = -0.7) + xlab('') + ylab('') +
+  theme_bw() + theme(legend.position = "none") + ylim(-2,2) +
+  ggtitle("rho=0")
+
+res2 = simple_lending_model(N=10,a=10,sigma=1,rho=0.5,X0=0)
+plot2 <- res2[[1]] %>% 
+  pivot_longer(cols = 'bank1':'bank10',values_to = 'value',names_to = 'bank') %>% 
+  ggplot(aes(times,value,colour=bank))+ geom_line(alpha=0.5) +
+  geom_hline(yintercept = -0.7) + xlab('') + ylab('') +
+  theme_bw() + theme(legend.position = "none") + ylim(-2,2) +
+  ggtitle("rho=0.5")
+
+gridExtra::grid.arrange(plot1,plot2,nrow=1)
+```
+
+## Systemic risk
+
+Let $\{\min_{0\leq t \leq T} \overline X_t \leq D \}$ be the systemic event. Then 
+$$ P \left( \min_{0\leq t \leq T} \overline X_t \leq D \right) = 2 \Phi\left( \frac{D\sqrt{N}}{\sigma \sqrt{T}} \right)$$
+
+```{r}
+N <- 10
+D <- -0.7
+end_time <- 1
+sigma <- 1
+prob_systemic <- 2*pnorm((D*sqrt(N))/(sigma * sqrt(T)))
+```
+
+So in the above simulations, the probability of the systemic event is `r round(prob_systemic,4)`, i.e. there is a 2.7% chance of the systemic event.
+
+
+In the model with correlated BMs:
+
+$$ P \left( \min_{0\leq t \leq T} \overline X_t \leq D \right) = 2 \Phi \left( \frac{D \sqrt{N}}{\sigma \sqrt{T(N-1) \rho^2 + 1}} \right)$$
+
+the probability of the systemic event is 
+```{r}
+N <- 10
+D <- -0.7
+end_time <- 1
+sigma <- 1
+rho <- 0.5
+prob_systemic2 <- 2*pnorm((D*sqrt(N))/(sigma * sqrt(T*(N-1)*rho^2 +1)))
+```
+
+The probability of the systemic event is now `r round(prob_systemic2,4)`
+
